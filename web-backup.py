@@ -21,6 +21,8 @@ import time
 from configobj import ConfigObj
 import argparse
 import logging
+import shlex
+from subprocess import Popen, PIPE, STDOUT
 
 # Read arguments
 parser = argparse.ArgumentParser()
@@ -105,11 +107,37 @@ def checkDirectory(directory):
         return 0
 
 
+def runCommand(command):
+
+    cmd = shlex.split(command)
+    logging.debug('Running command: "' + command + '"')
+
+    proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+    for line in proc.stderr:
+        logging.warning(str(line.strip()))
+
+    for line in proc.stdout:
+        logging.debug(str(line.strip()))
+
+    proc.wait()
+
+    if proc.returncode != 0:
+        logging.critical('Command failed with return code "' +
+                         str(proc.returncode) + '"')
+        return 1
+    else:
+        logging.debug('Command successfully finished with returncode "' +
+                      str(proc.returncode) + '"')
+        return 0
+
+
 # Classes
 
 class webBackup:
-    def __init__(self, name, stopCmd, startCmd, dumpCmd, webRoot, extraDirs):
+    def __init__(self, name, backupDir, tempDir, stopCmd, startCmd, dumpCmd, webRoot, extraDirs):
         self.name = name
+        self.backupDir = backupDir
+        self.tempDir = tempDir
         self.stopCmd = stopCmd
         self.startCmd = startCmd
         self.dumpCmd = dumpCmd
@@ -120,18 +148,121 @@ class webBackup:
 
         # Debug log settings
         logging.debug('Backup job name: ' + self.name)
+        logging.debug('Backup dir: ' + self.backupDir)
+        logging.debug('Temp dir: ' + self.tempDir)
         logging.debug('Stop command: ' + self.stopCmd)
         logging.debug('Start command: ' + self.startCmd)
         logging.debug('DB dump command: ' + self.dumpCmd)
         logging.debug('Web root dir: ' + self.webRoot)
-        logging.debug('Extra dirs: ' + self.extraDirs)
+        logging.debug('Extra dirs: ' + str(self.extraDirs))
 
         return
 
     def run_backup(self):
         timeStamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-        return(0, 'Success!')
+        target = self.name + "_" + timeStamp
+        tempTarget = self.tempDir + "/" + target
 
+        # Create temp dir
+        logging.debug('Creating temp target directory: "' + tempTarget + "'")
+        checkDirectory(tempTarget)
+
+        # Run the stop command
+        if self.stopCmd:
+            logging.info('Running stop command')
+            status = runCommand(self.stopCmd)
+
+            if status == 1:
+                msg = 'Stop command failed!'
+                logging.critical(msg)
+                return(1, msg)
+        else:
+            logging.debug('No stop command defined')
+
+        # Run database backup
+        if self.dumpCmd:
+            logging.info('Running DB dump')
+
+            fullCmd = self.dumpCmd + '> ' + \
+                tempTarget + '/dbdump_' + \
+                timeStamp + '.sql'
+
+            logging.debug('Full dump command: "' + fullCmd + '"')
+            status = runCommand(fullCmd)
+
+            if status == 1:
+                msg = 'Database dump failed!'
+                logging.critical(msg)
+                return(1, msg)
+        else:
+            logging.debug('No DB dump command defined')
+
+        # Backup web-root
+        if self.webRoot:
+            logging.info('Running web root backup')
+            fullCmd = 'cp -a ' + self.webRoot + ' ' + tempTarget + '/'
+
+            status = runCommand(fullCmd)
+
+            if status == 1:
+                msg = 'Web root backup failed!'
+                logging.critical(msg)
+                return(1, msg)
+        else:
+            logging.debug('No web root defined')
+
+        # Backup extra dirs
+        if self.extraDirs:
+            logging.info('Running extra dirs backup')
+            for directory in self.extraDirs:
+                fullCmd = 'cp -a ' + directory + ' ' + tempTarget + '/'
+
+                status = runCommand(fullCmd)
+
+                if status == 1:
+                    msg = 'Extra dir backup failed!'
+                    logging.critical(msg)
+                    return(1, msg)
+        else:
+            logging.debug('No extra dirs defined')
+
+        # Run the start command
+        if self.startCmd:
+            logging.info('Running start command')
+            status = runCommand(self.startCmd)
+
+            if status == 1:
+                msg = 'Start command failed!'
+                logging.critical(msg)
+                return(1, msg)
+        else:
+            logging.debug('No start command defined')
+
+        # Create archive
+        fullBackupDir = self.backupDir + '/' + self.name
+        checkDirectory(fullBackupDir)
+
+        logging.info('Creating archive')
+        fullCmd = 'tar cjpf ' + fullBackupDir + '/' + target + 'tar.bz2 ' + \
+            tempTarget
+        status = runCommand(fullCmd)
+
+        if status == 1:
+            msg = 'Archive failed!'
+            logging.critical(msg)
+            return(1, msg)
+
+        # Remove temp dir
+        logging.info('Removing temp dir')
+        fullCmd = 'rm -rf ' + tempTarget
+        status = runCommand(fullCmd)
+
+        if status == 1:
+            msg = 'Removing temp dir failed!'
+            logging.critical(msg)
+            return(1, msg)
+
+        return(0, 'Success!')
 
 # Main
 
@@ -162,6 +293,8 @@ for job in backupJobs.keys():
     # Run backup
     backup = webBackup(
         name,
+        backupDir,
+        tempDir,
         jobParams['service_stop_command'],
         jobParams['service_start_command'],
         jobParams['db_dump_command'],
@@ -189,6 +322,6 @@ if errors:
     print('\n')
     sys.exit(1)
 else:
-    print('Finished without errors\n')
-    logging.info('Backup run finished without errors')
+    print('Finished successfully\n')
+    logging.info('Backup run finished successfully')
     sys.exit(0)
